@@ -380,7 +380,13 @@ async fn cmd_auto_auth(
     }
 
     for attempt in 1..=retries {
-        tokio::time::sleep(delay).await;
+        // Delay only BETWEEN retries, never before the first probe.
+        // wait_for_ip() already gated on DHCP readiness, so sleeping 3s
+        // again before the first probe was 3s of wasted time during
+        // which the user could open a browser and see cert errors.
+        if attempt > 1 {
+            tokio::time::sleep(delay).await;
+        }
 
         match wifi::detect_captive_portal().await {
             ProbeResult::Online => {
