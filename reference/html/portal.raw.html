@@ -1,0 +1,128 @@
+<html> 
+<head> 
+<meta http-equiv="Pragma" content="no-cache"> 
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=iso-8859-1"> 
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welcome WMU Guest</title> 
+<link rel="stylesheet" href="css/patterns.css" type="text/css">
+
+<script> 
+ 
+function submitAction(){ 
+      var link = document.location.href; 
+      var searchString = "redirect="; 
+      var equalIndex = link.indexOf(searchString); 
+      var redirectUrl = ""; 
+      if(equalIndex >= 0) { 
+            equalIndex += searchString.length; 
+            redirectUrl = "http://www.wmich.edu"; 
+            redirectUrl += link.substring(equalIndex); 
+      } 
+      if(redirectUrl.length > 255) 
+      redirectUrl = redirectUrl.substring(0,255); 
+      document.forms[0].redirect_url.value = redirectUrl; 
+ 
+      document.forms[0].buttonClicked.value = 4; 
+      document.forms[0].submit(); 
+} 
+ 
+function loadAction(){ 
+      var url = window.location.href; 
+      var args = new Object(); 
+      var query = location.search.substring(1); 
+      var pairs = query.split("&"); 
+      for(var i=0;i<pairs.length;i++){ 
+          var pos = pairs[i].indexOf('='); 
+          if(pos == -1) continue; 
+          var argname = pairs[i].substring(0,pos); 
+          var value = pairs[i].substring(pos+1); 
+          args[argname] = unescape(value); 
+      } 
+      //alert( "AP MAC Address is " + args.ap_mac); 
+      //alert( "The controller URL is " + args.switch_url); 
+      document.forms[0].action = args.switch_url; 
+} 
+ 
+</script>
+<style>
+textarea {
+	height: 300px !important;
+}
+</style>
+</head> 
+<body onload="loadAction();"> 
+<div id="page" class="grid-container">
+<div class="grid-x align-center">
+<div id="content" class="cell">
+<header class="grid-x grid-padding-x grid-padding-y align-center">
+<div class="cell medium-6 large-6"><img src="img/wmu-primary-digital.png" alt="Western Michigan University logo" style="max-height: 120px;"></div>
+<div class="cell medium-6 large-6 text-right">
+</div>
+<h1>Welcome to WMU's Guest Access Web Page</h1>	
+</header>
+<main class="grid-x">
+<div class="cell">
+<h2 class="h3">WMU Guest Acceptable Use Policy</h2>
+
+<form method="post"> 
+<input TYPE="hidden" NAME="buttonClicked" SIZE="16" MAXLENGTH="15" value="0"> 
+<input TYPE="hidden" NAME="redirect_url" SIZE="255" MAXLENGTH="255" VALUE=""> 
+<input TYPE="hidden" NAME="err_flag" SIZE="16" MAXLENGTH="15" value="0"> 
+ 
+<textarea name="textareaName" cols="60" rows="24" wrap="virtual" disable align=" top">
+Purpose
+
+This policy sets forth the rules for using WMU Guest wireless network.
+
+Scope
+
+These rules apply to all users of the WMU Guest wireless network.
+
+Policy statements
+
+Your day by day access to the WMU Guest wireless network at Western Michigan University has been granted to you as a visitor of a WMU student, faculty or staff member. This access is for you and you alone. You may not share this access with others who are not visitors of a WMU student, faculty or staff member.
+
+ - Commercial use of this resource is prohibited. 
+
+ - Act responsibly and practice due diligence while you are connected to the Internet through the WMU Guest wireless network of Western Michigan University.
+
+ - This network is a shared resource, thus network use or applications that inhibit or interfere with the use of this network by others, is not permitted.
+
+Enforcement
+
+The Office of Information Technology reserves the right to terminate any network connection without notice should it be determined that network traffic generated from said connection unfavorably inhibits or interferes with the use of the network by others.
+
+Reference
+
+All users of network resources at Western Michigan University are responsible for adherence to any State or Federal regulations regarding computer use, including, but not limited to, the Telecommunications Act of 1996.
+
+Document action
+Created: June 2015
+</textarea>
+
+<p>By clicking "Accept", you signify that you have read and will abide
+by the terms of the Western Michigan University Guest Acceptable Usage Policy.</p>
+<p><b>You must click the "Accept" button to agree to "WMU's Guest Acceptable Use Policy" to use the network.</b></p>
+
+<table border="0" cellspacing="0" cellpadding="0"> 
+<tr align="center"> 
+<td><input type="button" name="Accept" value="Accept" class="button" onclick="submitAction();">
+</td> 
+</tr> 
+</table> 
+</form> 	
+	
+	
+	
+</div>
+</main>
+<footer class="grid-x  grid-padding-x grid-y">
+<div class="cell text-right">
+<p>Western Michigan University<br>Kalamazoo MI 49008 USA</p>
+</div>
+</footer>
+</div>
+</div>
+</div>
+</body>
+</html>
