@@ -455,6 +455,21 @@ async fn cmd_auto_auth(
                     }
                 }
                 if confirmed {
+                    // Tell NetworkManager to re-run its own connectivity
+                    // check so UI state flips PORTAL → FULL. Desktop envs
+                    // (GNOME/KDE) and browsers that watch NM's DBus state
+                    // (Firefox captive portal detection) clear their
+                    // captive banners and pick up the working connection.
+                    let _ = tokio::process::Command::new("dbus-send")
+                        .args([
+                            "--system",
+                            "--print-reply",
+                            "--dest=org.freedesktop.NetworkManager",
+                            "/org/freedesktop/NetworkManager",
+                            "org.freedesktop.NetworkManager.CheckConnectivity",
+                        ])
+                        .output()
+                        .await;
                     return Ok(());
                 }
                 eprintln!("wmu-guest-auth: still captive after auth (attempt {attempt}/{retries})");

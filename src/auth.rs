@@ -58,16 +58,40 @@ pub async fn authenticate(params: &WlcParams) -> Result<AuthResult, WmuError> {
         ("network_name", "Guest Network"),
     ];
 
-    let resp = client
-        .post(params.switch_url.as_str())
-        .header("Referer", POLICY_PAGE_URL)
-        .header("Origin", POLICY_ORIGIN)
-        .form(&form)
-        .send()
-        .await?;
+    let post_once = |client: &reqwest::Client| {
+        let client = client.clone();
+        let switch_url = params.switch_url.clone();
+        let form = form.clone();
+        async move {
+            let resp = client
+                .post(switch_url.as_str())
+                .header("Referer", POLICY_PAGE_URL)
+                .header("Origin", POLICY_ORIGIN)
+                .form(&form)
+                .send()
+                .await?;
+            let status = resp.status().as_u16();
+            let body = resp.text().await?;
+            Ok::<_, reqwest::Error>((status, body))
+        }
+    };
 
-    let status = resp.status().as_u16();
-    let body = resp.text().await?;
+    let (mut status, mut body) = post_once(&client).await?;
+
+    // err_flag=1 in response body = WLC rejected with "prior attempt
+    // failed". Cisco's own loginscript.js submitAction() handles this by
+    // re-POSTing with err_flag=0 and the same redirect_url. Replicate that
+    // one-shot retry; repeated err_flag=1 means genuine failure.
+    let body_lower = body.to_lowercase();
+    let err_flag_set = body_lower
+        .contains("name=\"err_flag\" size=\"16\" maxlength=\"15\" value=\"1\"")
+        || body_lower.contains("err_flag\" value=\"1\"");
+    if err_flag_set {
+        eprintln!("wmu-guest-auth: response has err_flag=1, retrying POST");
+        let retry = post_once(&client).await?;
+        status = retry.0;
+        body = retry.1;
+    }
 
     // Strict success detection: require an explicit success marker AND
     // confirm the response is NOT still the login form. The previous
