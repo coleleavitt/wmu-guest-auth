@@ -1,0 +1,14 @@
+[package]
+name = "wmu-guest-auth"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", features = ["cookies"] }
+thiserror = "2"
+hickory-resolver = "0.25"
+scraper = "0.22"
+url = "2"
+colored = "3"
