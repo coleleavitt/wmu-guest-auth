@@ -398,18 +398,29 @@ async fn cmd_auto_auth(
                 match portal::fetch_portal(&portal_url).await {
                     Ok(page) => {
                         eprintln!(
-                            "wmu-guest-auth: switch_url={} ap_mac={}",
-                            page.params.switch_url, page.params.ap_mac
+                            "wmu-guest-auth: switch_url={} ap_mac={} client_mac={} statusCode={}",
+                            page.params.switch_url,
+                            page.params.ap_mac,
+                            page.params.client_mac,
+                            page.params.status_code,
                         );
-                        match auth::authenticate(&page.params).await {
-                            Ok(result) => {
-                                eprintln!(
+                        // statusCode=1 = "already logged in" per Cisco WLC.
+                        // Re-POSTing would loop (WLC rejects, redirects back
+                        // with statusCode=1 again). Skip POST; the re-probe
+                        // below will either confirm we're actually online
+                        // (stale portal cache) or fall through to attempt
+                        // auth on the next retry iteration.
+                        if page.params.status_code == 1 {
+                            eprintln!(
+                                "wmu-guest-auth: statusCode=1 (WLC says already logged in) - skipping POST"
+                            );
+                        } else {
+                            match auth::authenticate(&page.params).await {
+                                Ok(result) => eprintln!(
                                     "wmu-guest-auth: POST buttonClicked=4 → HTTP {} (body-success={})",
                                     result.status, result.success
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!("wmu-guest-auth: auth POST failed: {e}");
+                                ),
+                                Err(e) => eprintln!("wmu-guest-auth: auth POST failed: {e}"),
                             }
                         }
                     }

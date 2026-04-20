@@ -141,6 +141,7 @@ pub async fn detect_captive_portal() -> ProbeResult {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
         .timeout(Duration::from_secs(5))
         .user_agent(PROBE_USER_AGENT)
         .build()

@@ -9,44 +9,38 @@ pub struct WlcParams {
     pub wlan: String,
     pub status_code: u8,
     pub redirect_url: String,
+    pub client_mac: String,
+    pub redirect: String,
 }
 
 impl WlcParams {
     pub fn from_portal_url(portal_url: &Url) -> Result<Self, WmuError> {
         let pairs: Vec<(String, String)> = portal_url.query_pairs().into_owned().collect();
+        let find = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
 
-        let switch_url = pairs
-            .iter()
-            .find(|(k, _)| k == "switch_url")
-            .map(|(_, v)| v.as_str())
-            .ok_or(WmuError::MissingParam {
-                param: "switch_url",
-            })?;
+        let switch_url = find("switch_url").ok_or(WmuError::MissingParam {
+            param: "switch_url",
+        })?;
 
-        let ap_mac = pairs
-            .iter()
-            .find(|(k, _)| k == "ap_mac")
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default();
+        // statusCode absent = normal initial redirect. Default 0 (not 1) so
+        // we don't trigger the "already logged in" skip path for URLs that
+        // legitimately omit it. statusCode=1 is the WLC's explicit signal.
+        let status_code = find("statusCode").and_then(|v| v.parse().ok()).unwrap_or(0);
 
-        let wlan = pairs
-            .iter()
-            .find(|(k, _)| k == "wlan")
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default();
-
-        let status_code = pairs
-            .iter()
-            .find(|(k, _)| k == "statusCode")
-            .and_then(|(_, v)| v.parse().ok())
-            .unwrap_or(1);
+        // redirect_url on POST is built by the browser as
+        // "http://www.wmich.edu" + <rest after "redirect=">. We replicate
+        // that by storing the raw `redirect` value here; auth.rs constructs
+        // the final redirect_url field to match browser behavior.
+        let redirect = find("redirect").unwrap_or_default();
 
         Ok(Self {
-            switch_url: Url::parse(switch_url)?,
-            ap_mac,
-            wlan,
+            switch_url: Url::parse(&switch_url)?,
+            ap_mac: find("ap_mac").unwrap_or_default(),
+            wlan: find("wlan").unwrap_or_default(),
             status_code,
             redirect_url: String::new(),
+            client_mac: find("client_mac").unwrap_or_default(),
+            redirect,
         })
     }
 
@@ -55,8 +49,10 @@ impl WlcParams {
             switch_url: Url::parse("https://virtual.wireless.wmich.edu/login.html").unwrap(),
             ap_mac: String::new(),
             wlan: "WMU Guest".to_string(),
-            status_code: 1,
+            status_code: 0,
             redirect_url: String::new(),
+            client_mac: String::new(),
+            redirect: String::new(),
         }
     }
 }
@@ -94,6 +90,7 @@ impl std::fmt::Display for AssetKind {
 pub async fn fetch_portal(portal_url: &Url) -> Result<PortalPage, WmuError> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
 
@@ -154,6 +151,7 @@ fn extract_assets(base_url: &Url, html: &str) -> Vec<AssetRef> {
 pub async fn fetch_wlc_page(switch_url: &Url) -> Result<(String, Vec<AssetRef>), WmuError> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
         .build()?;
 
     let html = client.get(switch_url.as_str()).send().await?.text().await?;

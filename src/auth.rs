@@ -20,6 +20,7 @@ const POLICY_ORIGIN: &str = "https://legacy.wmich.edu";
 pub async fn authenticate(params: &WlcParams) -> Result<AuthResult, WmuError> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
         .redirect(reqwest::redirect::Policy::limited(10))
         .cookie_store(true)
         .user_agent(BROWSER_USER_AGENT)
@@ -31,18 +32,30 @@ pub async fn authenticate(params: &WlcParams) -> Result<AuthResult, WmuError> {
     // authenticated list. Errors here are non-fatal; proceed to POST.
     let _ = client.get(params.switch_url.as_str()).send().await;
 
-    let mut redirect_url = params.redirect_url.clone();
-    if redirect_url.is_empty() {
-        redirect_url = "http://www.wmich.edu".to_string();
-    }
+    // Replicate the portal's submitAction() exactly: if a `redirect=` param
+    // was in the source URL, final redirect_url = "http://www.wmich.edu"
+    // concatenated with the raw rest (yes, Cisco/WMU's JS really does build
+    // a malformed URL this way — the WLC ignores the value). If no redirect
+    // param, leave blank just like the browser.
+    let mut redirect_url = if params.redirect.is_empty() {
+        String::new()
+    } else {
+        format!("http://www.wmich.edu{}", params.redirect)
+    };
     if redirect_url.len() > 255 {
         redirect_url.truncate(255);
     }
 
+    // Match the WLC's full form schema (7 fields per wlc-login.html) so any
+    // firmware variant that validates field presence is satisfied.
     let form = [
         ("buttonClicked", "4"),
-        ("redirect_url", redirect_url.as_str()),
         ("err_flag", "0"),
+        ("err_msg", ""),
+        ("info_flag", "0"),
+        ("info_msg", ""),
+        ("redirect_url", redirect_url.as_str()),
+        ("network_name", "Guest Network"),
     ];
 
     let resp = client
@@ -87,6 +100,7 @@ pub async fn authenticate(params: &WlcParams) -> Result<AuthResult, WmuError> {
 pub async fn deauthenticate(switch_url: &Url) -> Result<AuthResult, WmuError> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
         .user_agent(BROWSER_USER_AGENT)
         .build()?;
 

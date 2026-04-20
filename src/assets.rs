@@ -15,6 +15,7 @@ pub async fn download_all(
 ) -> Result<Vec<DownloadedAsset>, WmuError> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
         .build()?;
 
     let mut results = Vec::new();
