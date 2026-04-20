@@ -77,6 +77,13 @@ enum Commands {
         retries: u8,
         #[arg(short, long, default_value = "3")]
         delay: u64,
+        /// Interface to wait for DHCP on before probing. If unset, the tool
+        /// tries to auto-detect the first active wifi device via nmcli.
+        #[arg(short, long)]
+        interface: Option<String>,
+        /// Max seconds to wait for a DHCP lease before starting the probe loop.
+        #[arg(long, default_value = "30")]
+        dhcp_timeout: u64,
     },
 }
 
@@ -95,7 +102,12 @@ async fn main() -> Result<(), WmuError> {
         Commands::Recon { output } => cmd_recon(&output).await,
         Commands::Dump { url, output } => cmd_dump(url, &output).await,
         Commands::Full { url, output } => cmd_full(url, &output).await,
-        Commands::AutoAuth { retries, delay } => cmd_auto_auth(retries, delay).await,
+        Commands::AutoAuth {
+            retries,
+            delay,
+            interface,
+            dhcp_timeout,
+        } => cmd_auto_auth(retries, delay, interface, dhcp_timeout).await,
     }
 }
 
@@ -338,8 +350,34 @@ async fn cmd_connect(
 
 const CAPTIVE_PORTAL_PROBE_URL: &str = "http://connectivitycheck.gstatic.com/generate_204";
 
-async fn cmd_auto_auth(retries: u8, delay: u64) -> Result<(), WmuError> {
+async fn cmd_auto_auth(
+    retries: u8,
+    delay: u64,
+    interface: Option<String>,
+    dhcp_timeout: u64,
+) -> Result<(), WmuError> {
     let delay = Duration::from_secs(delay);
+
+    // Wait for a DHCP lease before probing. Without this, the NM dispatcher
+    // runs the tool on "action=up" which fires BEFORE DHCP completes; probes
+    // fail with NoNetwork for 40s then the tool gives up and NM never
+    // re-triggers. The user is left stranded behind the captive portal.
+    let iface = match interface {
+        Some(i) => Some(i),
+        None => wifi::detect_wifi_interface().await,
+    };
+    if let Some(iface) = iface {
+        eprintln!("wmu-guest-auth: waiting up to {dhcp_timeout}s for DHCP on {iface}");
+        match wifi::wait_for_ip(&iface, Duration::from_secs(dhcp_timeout)).await {
+            Ok(state) => eprintln!(
+                "wmu-guest-auth: got lease ip={} on {iface}",
+                state.ip.as_deref().unwrap_or("-")
+            ),
+            Err(e) => eprintln!("wmu-guest-auth: dhcp wait warning: {e} (continuing anyway)"),
+        }
+    } else {
+        eprintln!("wmu-guest-auth: no wifi interface detected, skipping DHCP wait");
+    }
 
     for attempt in 1..=retries {
         tokio::time::sleep(delay).await;

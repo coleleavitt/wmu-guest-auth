@@ -113,6 +113,23 @@ pub async fn wait_for_ip(interface: &str, timeout: Duration) -> Result<WifiState
     }
 }
 
+pub async fn detect_wifi_interface() -> Option<String> {
+    let output = Command::new("nmcli")
+        .args(["-t", "-f", "DEVICE,TYPE,STATE", "device"])
+        .output()
+        .await
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 3 && parts[1] == "wifi" && parts[2].contains("connected") {
+            return Some(parts[0].to_string());
+        }
+    }
+    None
+}
+
 #[derive(Debug)]
 pub enum ProbeResult {
     CaptivePortal { redirect_url: Url },
@@ -146,12 +163,14 @@ pub async fn detect_captive_portal() -> ProbeResult {
         }
     }
 
-    if (301..=303).contains(&status) || status == 307 || status == 308 {
-        if let Some(location) = resp.headers().get("location") {
-            if let Ok(loc_str) = location.to_str() {
-                if let Ok(url) = Url::parse(loc_str) {
-                    return ProbeResult::CaptivePortal { redirect_url: url };
-                }
+    // Check Location header on ANY non-204 status, not just 3xx. Some Cisco
+    // WLC firmware returns HTTP 200 with a Location header pointing at the
+    // policy page (observed in the wild: 200 OK + Location +
+    // <meta http-equiv="refresh"> body). The strict 3xx gate missed this.
+    if let Some(location) = resp.headers().get("location") {
+        if let Ok(loc_str) = location.to_str() {
+            if let Ok(url) = Url::parse(loc_str) {
+                return ProbeResult::CaptivePortal { redirect_url: url };
             }
         }
     }

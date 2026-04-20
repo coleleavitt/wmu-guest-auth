@@ -7,4 +7,9 @@ CONNECTION_ID="$CONNECTION_ID"
 [ "$ACTION" = "up" ] || [ "$ACTION" = "connectivity-change" ] || exit 0
 
 logger -t wmu-guest-auth "triggered: interface=$INTERFACE action=$ACTION"
-/usr/local/bin/wmu-guest-auth auto-auth --retries 5 --delay 3 2>&1 | logger -t wmu-guest-auth &
+/usr/local/bin/wmu-guest-auth auto-auth \
+    --interface "$INTERFACE" \
+    --dhcp-timeout 30 \
+    --retries 5 \
+    --delay 3 \
+    2>&1 | logger -t wmu-guest-auth &
