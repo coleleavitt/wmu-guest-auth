@@ -350,6 +350,25 @@ async fn cmd_connect(
 
 const CAPTIVE_PORTAL_PROBE_URL: &str = "http://connectivitycheck.gstatic.com/generate_204";
 
+/// Ask NetworkManager to re-run its own connectivity check. Flips NM state
+/// PORTAL → FULL so desktop envs (GNOME/KDE) and browsers that watch NM's
+/// DBus state (Firefox captive portal detector) drop their captive banners
+/// and pick up the working connection. Called after ANY successful exit
+/// (fresh auth OR already-online), because an already-online result from
+/// our probe doesn't mean NM has re-checked.
+async fn kick_nm_connectivity() {
+    let _ = tokio::process::Command::new("dbus-send")
+        .args([
+            "--system",
+            "--print-reply",
+            "--dest=org.freedesktop.NetworkManager",
+            "/org/freedesktop/NetworkManager",
+            "org.freedesktop.NetworkManager.CheckConnectivity",
+        ])
+        .output()
+        .await;
+}
+
 async fn cmd_auto_auth(
     retries: u8,
     delay: u64,
@@ -391,6 +410,7 @@ async fn cmd_auto_auth(
         match wifi::detect_captive_portal().await {
             ProbeResult::Online => {
                 eprintln!("wmu-guest-auth: already online (attempt {attempt})");
+                kick_nm_connectivity().await;
                 return Ok(());
             }
             ProbeResult::NoNetwork => {
@@ -455,21 +475,7 @@ async fn cmd_auto_auth(
                     }
                 }
                 if confirmed {
-                    // Tell NetworkManager to re-run its own connectivity
-                    // check so UI state flips PORTAL → FULL. Desktop envs
-                    // (GNOME/KDE) and browsers that watch NM's DBus state
-                    // (Firefox captive portal detection) clear their
-                    // captive banners and pick up the working connection.
-                    let _ = tokio::process::Command::new("dbus-send")
-                        .args([
-                            "--system",
-                            "--print-reply",
-                            "--dest=org.freedesktop.NetworkManager",
-                            "/org/freedesktop/NetworkManager",
-                            "org.freedesktop.NetworkManager.CheckConnectivity",
-                        ])
-                        .output()
-                        .await;
+                    kick_nm_connectivity().await;
                     return Ok(());
                 }
                 eprintln!("wmu-guest-auth: still captive after auth (attempt {attempt}/{retries})");

@@ -9,8 +9,8 @@ CONNECTION_ID="$CONNECTION_ID"
 logger -t wmu-guest-auth "pre-up triggered: interface=$INTERFACE"
 /usr/local/bin/wmu-guest-auth auto-auth \
     --interface "$INTERFACE" \
-    --dhcp-timeout 10 \
-    --retries 3 \
+    --dhcp-timeout 30 \
+    --retries 5 \
     --delay 2 \
     2>&1 | logger -t wmu-guest-auth
 logger -t wmu-guest-auth "pre-up done (exit=$?)"
