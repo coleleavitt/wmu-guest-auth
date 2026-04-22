@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use tokio::process::Command;
 use zbus::Connection;
 use zbus::fdo::PropertiesProxy;
 use zbus::zvariant::OwnedObjectPath;
@@ -11,27 +10,36 @@ use crate::wifi;
 
 const TARGET_SSID: &str = "WMU Guest";
 const COOLDOWN: Duration = Duration::from_secs(15);
-const SELF_POLL: Duration = Duration::from_secs(5);
 const KEEPALIVE: Duration = Duration::from_secs(120);
 const PROACTIVE_REAUTH: Duration = Duration::from_secs(15 * 60);
 const CONN_FULL: u32 = 4;
 
 const KEEPALIVE_URL: &str = "https://www.gstatic.com/generate_204";
 
+/// Adaptive self-poll intervals. When the last auth was recent or the
+/// connection is unstable, poll aggressively (5s). After N consecutive
+/// "confirmed online" polls, back off to reduce wakeups / battery drain.
+/// Resets to FAST on any observed captive state or roam event.
+const POLL_FAST: Duration = Duration::from_secs(5);
+const POLL_STABLE: Duration = Duration::from_secs(15);
+const POLL_IDLE: Duration = Duration::from_secs(45);
+const STABLE_THRESHOLD: u32 = 6;
+const IDLE_THRESHOLD: u32 = 24;
+
 /// Run the daemon event loop. Subscribes to two NM DBus property streams:
 ///
-///   1. `Device.Wireless.ActiveAccessPoint` on every wireless device —
-///      catches same-SSID AP roams. Dispatcher scripts do NOT fire on roam
-///      (verified against /tmp/NetworkManager/src/core/nm-dispatcher.h);
-///      NM emits the event only on DBus via set_current_ap() in
-///      nm-device-wifi.c:2775.
+///   1. `Device.Wireless.ActiveAccessPoint` — catches same-SSID roams.
+///      Dispatcher scripts do NOT fire on roam (verified in
+///      /tmp/NetworkManager/src/core/nm-dispatcher.h); NM emits only via
+///      DBus in nm-device-wifi.c:2775.
+///   2. `NetworkManager.Connectivity` — catches PORTAL transitions.
 ///
-///   2. `NetworkManager.Connectivity` — catches PORTAL transitions from
-///      session timeouts (WLC revokes our MAC after inactivity), when NM's
-///      own periodic connectivity check flips FULL → PORTAL.
+/// Plus three timers: adaptive self-poll (5s→15s→45s), keepalive (120s,
+/// keeps WLC idle timer from firing), proactive reauth (15min, refreshes
+/// WLC session before it times out).
 ///
-/// On any trigger, invokes `wmu-guest-auth auto-auth` as a subprocess. Uses
-/// a 30s cooldown to absorb roam storms at marginal AP boundaries.
+/// All auth work happens in-process via crate::cmd_auto_auth — no subprocess
+/// spawning, no double dispatch, ~50ms faster per trigger.
 pub async fn run() -> Result<(), WmuError> {
     log("starting daemon");
     let conn = Connection::system().await.map_err(dbus_err)?;
@@ -82,19 +90,17 @@ pub async fn run() -> Result<(), WmuError> {
     triggers.push(nm_stream.boxed());
     log("subscribed to PropertiesChanged on /org/freedesktop/NetworkManager");
 
-    let mut last_trigger: Option<Instant> = None;
+    let mut state = DaemonState::default();
 
-    // Startup self-check: run once immediately so we auth on daemon start
-    // if we're already captive. Avoids waiting for the first event.
     log("startup self-check");
     if on_target_ssid(&conn).await
         && should_auth_now().await
-        && try_trigger(&mut last_trigger, "startup self-check").await
+        && try_trigger(&mut state, "startup self-check").await
     {
         log("startup self-check complete");
     }
 
-    let mut poll_tick = tokio::time::interval(SELF_POLL);
+    let mut poll_tick = tokio::time::interval(POLL_FAST);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     poll_tick.tick().await;
 
@@ -107,9 +113,11 @@ pub async fn run() -> Result<(), WmuError> {
     reauth_tick.tick().await;
 
     log(&format!(
-        "event loop running (cooldown={}s, self-poll={}s, keepalive={}s, proactive-reauth={}s)",
+        "event loop running (cooldown={}s, poll=adaptive[{}/{}/{}]s, keepalive={}s, proactive-reauth={}s)",
         COOLDOWN.as_secs(),
-        SELF_POLL.as_secs(),
+        POLL_FAST.as_secs(),
+        POLL_STABLE.as_secs(),
+        POLL_IDLE.as_secs(),
         KEEPALIVE.as_secs(),
         PROACTIVE_REAUTH.as_secs()
     ));
@@ -123,23 +131,21 @@ pub async fn run() -> Result<(), WmuError> {
                 };
                 let iface = args.interface_name();
                 let changed: Vec<&str> = args.changed_properties().keys().copied().collect();
-                log(&format!(
-                    "event: iface={} props={:?}",
-                    iface.as_str(),
-                    changed
-                ));
 
                 let reason = if iface.as_str() == "org.freedesktop.NetworkManager.Device.Wireless" {
                     if !changed.contains(&"ActiveAccessPoint") { continue; }
                     Some("roam (ActiveAccessPoint changed)")
                 } else if iface.as_str() == "org.freedesktop.NetworkManager" {
                     let Some(v) = args.changed_properties().get("Connectivity") else { continue };
-                    let state: u32 = match v.downcast_ref::<u32>() {
+                    let state_val: u32 = match v.downcast_ref::<u32>() {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
-                    log(&format!("Connectivity property → {state} ({})", conn_state_name(state)));
-                    if state == CONN_FULL { continue; }
+                    log(&format!(
+                        "Connectivity → {state_val} ({})",
+                        conn_state_name(state_val)
+                    ));
+                    if state_val == CONN_FULL { continue; }
                     Some("connectivity dropped")
                 } else {
                     None
@@ -150,40 +156,114 @@ pub async fn run() -> Result<(), WmuError> {
                     log(&format!("{reason} but active SSID != {TARGET_SSID}, skipping"));
                     continue;
                 }
-                try_trigger(&mut last_trigger, reason).await;
+                // DBus event implies volatility — reset poll to fast.
+                state.clean_polls = 0;
+                set_poll_interval(&mut poll_tick, state.current_poll_interval());
+                try_trigger(&mut state, reason).await;
             }
             _ = poll_tick.tick() => {
-                if !on_target_ssid(&conn).await {
-                    continue;
-                }
-                log("self-poll: checking is_truly_online");
+                if !on_target_ssid(&conn).await { continue; }
+                log(&format!(
+                    "self-poll (clean_polls={}, interval={}s)",
+                    state.clean_polls,
+                    state.current_poll_interval().as_secs()
+                ));
                 if should_auth_now().await {
-                    try_trigger(&mut last_trigger, "self-poll detected captive").await;
+                    let drop_gap = state.record_captive();
+                    if let Some(gap) = drop_gap {
+                        log(&format!(
+                            "WLC session observation: captive after {}s of continuous online (possible WLC session/idle timeout)",
+                            gap.as_secs()
+                        ));
+                    }
+                    try_trigger(&mut state, "self-poll detected captive").await;
+                    set_poll_interval(&mut poll_tick, POLL_FAST);
                 } else {
-                    log("self-poll: confirmed online");
+                    state.record_clean_poll();
+                    let new_interval = state.current_poll_interval();
+                    log(&format!(
+                        "self-poll: online (clean_polls={}, next poll in {}s)",
+                        state.clean_polls,
+                        new_interval.as_secs()
+                    ));
+                    set_poll_interval(&mut poll_tick, new_interval);
                 }
             }
             _ = keepalive_tick.tick() => {
-                if !on_target_ssid(&conn).await {
-                    continue;
-                }
+                if !on_target_ssid(&conn).await { continue; }
                 send_keepalive().await;
             }
             _ = reauth_tick.tick() => {
-                if !on_target_ssid(&conn).await {
-                    continue;
-                }
-                // Proactive reauth: fire regardless of current state to
-                // refresh the WLC session before it can time out. If we're
-                // still in RUN state this is a no-op on the WLC side
-                // (buttonClicked=4 to an already-authed MAC is idempotent).
-                // Bypasses the normal cooldown because this is scheduled,
-                // not reactive.
+                if !on_target_ssid(&conn).await { continue; }
+                // Proactive reauth bypasses cooldown — it's scheduled,
+                // not reactive. buttonClicked=4 on an already-authed MAC
+                // is a no-op on the WLC side (idempotent). Refreshes the
+                // session clock before WLC timeout can fire.
                 log("proactive reauth: refreshing WLC session");
-                last_trigger = None;
-                try_trigger(&mut last_trigger, "proactive reauth").await;
+                state.last_trigger = None;
+                try_trigger(&mut state, "proactive reauth").await;
             }
         }
+    }
+}
+
+/// Mutable state the daemon carries across events. Tracks adaptive-poll
+/// counters, cooldown timer, and the moment of last confirmed-online for
+/// session-lifetime observation.
+struct DaemonState {
+    last_trigger: Option<Instant>,
+    last_confirmed_online: Option<Instant>,
+    clean_polls: u32,
+    was_captive_last_poll: bool,
+}
+
+impl Default for DaemonState {
+    fn default() -> Self {
+        Self {
+            last_trigger: None,
+            last_confirmed_online: None,
+            clean_polls: 0,
+            was_captive_last_poll: false,
+        }
+    }
+}
+
+impl DaemonState {
+    fn current_poll_interval(&self) -> Duration {
+        if self.clean_polls >= IDLE_THRESHOLD {
+            POLL_IDLE
+        } else if self.clean_polls >= STABLE_THRESHOLD {
+            POLL_STABLE
+        } else {
+            POLL_FAST
+        }
+    }
+
+    fn record_clean_poll(&mut self) {
+        self.clean_polls = self.clean_polls.saturating_add(1);
+        self.last_confirmed_online = Some(Instant::now());
+        self.was_captive_last_poll = false;
+    }
+
+    /// Called when self-poll detects captive. Returns the gap since the
+    /// last confirmed-online, if known — this is a good approximation of
+    /// the WLC's session/idle timeout, useful for tuning PROACTIVE_REAUTH.
+    fn record_captive(&mut self) -> Option<Duration> {
+        let gap = if self.was_captive_last_poll {
+            None
+        } else {
+            self.last_confirmed_online.map(|t| t.elapsed())
+        };
+        self.clean_polls = 0;
+        self.was_captive_last_poll = true;
+        gap
+    }
+}
+
+fn set_poll_interval(tick: &mut tokio::time::Interval, new: Duration) {
+    if tick.period() != new {
+        *tick = tokio::time::interval_at(tokio::time::Instant::now() + new, new);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     }
 }
 
@@ -198,11 +278,11 @@ async fn send_keepalive() {
     let start = Instant::now();
     match client.head(KEEPALIVE_URL).send().await {
         Ok(r) => log(&format!(
-            "keepalive HEAD {KEEPALIVE_URL} → {} in {}ms",
+            "keepalive → {} in {}ms",
             r.status().as_u16(),
             start.elapsed().as_millis()
         )),
-        Err(e) => log(&format!("keepalive failed ({e}) - WLC may have dropped us")),
+        Err(e) => log(&format!("keepalive failed ({e}) — WLC may have dropped us")),
     }
 }
 
@@ -210,38 +290,26 @@ async fn should_auth_now() -> bool {
     !wifi::is_truly_online().await
 }
 
-async fn try_trigger(last: &mut Option<Instant>, reason: &str) -> bool {
-    if let Some(t) = *last {
+async fn try_trigger(state: &mut DaemonState, reason: &str) -> bool {
+    if let Some(t) = state.last_trigger {
         if t.elapsed() < COOLDOWN {
             let remaining = COOLDOWN.saturating_sub(t.elapsed()).as_secs();
-            log(&format!(
-                "{reason} (cooldown {remaining}s remaining, skipping)"
-            ));
+            log(&format!("{reason} (cooldown {remaining}s, skipping)"));
             return false;
         }
     }
-    *last = Some(Instant::now());
-    log(&format!("{reason} → triggering auto-auth subprocess"));
+    state.last_trigger = Some(Instant::now());
+    log(&format!("{reason} → in-process auto-auth starting"));
     let start = Instant::now();
-    let status = Command::new("/usr/local/bin/wmu-guest-auth")
-        .args([
-            "auto-auth",
-            "--retries",
-            "2",
-            "--delay",
-            "2",
-            "--dhcp-timeout",
-            "5",
-        ])
-        .status()
-        .await;
-    match status {
-        Ok(s) => log(&format!(
-            "auto-auth subprocess finished in {}ms exit={:?}",
-            start.elapsed().as_millis(),
-            s.code()
+    match crate::cmd_auto_auth(2, 2, None, 5).await {
+        Ok(()) => log(&format!(
+            "auto-auth succeeded in {}ms",
+            start.elapsed().as_millis()
         )),
-        Err(e) => log(&format!("auto-auth subprocess failed: {e}")),
+        Err(e) => log(&format!(
+            "auto-auth failed in {}ms: {e}",
+            start.elapsed().as_millis()
+        )),
     }
     true
 }
@@ -268,6 +336,7 @@ fn conn_state_name(s: u32) -> &'static str {
         _ => "?",
     }
 }
+
 async fn discover_wifi_devices(conn: &Connection) -> Result<Vec<OwnedObjectPath>, WmuError> {
     let nm = zbus::Proxy::new(
         conn,

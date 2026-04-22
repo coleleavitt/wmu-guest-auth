@@ -362,7 +362,7 @@ const CAPTIVE_PORTAL_PROBE_URL: &str = "http://connectivitycheck.gstatic.com/gen
 /// and pick up the working connection. Called after ANY successful exit
 /// (fresh auth OR already-online), because an already-online result from
 /// our probe doesn't mean NM has re-checked.
-async fn kick_nm_connectivity() {
+pub(crate) async fn kick_nm_connectivity() {
     let _ = tokio::process::Command::new("dbus-send")
         .args([
             "--system",
@@ -375,7 +375,7 @@ async fn kick_nm_connectivity() {
         .await;
 }
 
-async fn cmd_auto_auth(
+pub(crate) async fn cmd_auto_auth(
     retries: u8,
     delay: u64,
     interface: Option<String>,
