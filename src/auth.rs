@@ -18,6 +18,10 @@ const POLICY_PAGE_URL: &str = "https://legacy.wmich.edu/oit/guest/wmu-guest-poli
 const POLICY_ORIGIN: &str = "https://legacy.wmich.edu";
 
 pub async fn authenticate(params: &WlcParams) -> Result<AuthResult, WmuError> {
+    eprintln!(
+        "wmu-guest-auth: authenticate target={} ap_mac={} client_mac={} statusCode={}",
+        params.switch_url, params.ap_mac, params.client_mac, params.status_code,
+    );
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .danger_accept_invalid_hostnames(true)
@@ -30,7 +34,14 @@ pub async fn authenticate(params: &WlcParams) -> Result<AuthResult, WmuError> {
     // establish session state on the controller. Without it the POST is
     // accepted (HTTP 200) but the client MAC is never moved to the
     // authenticated list. Errors here are non-fatal; proceed to POST.
-    let _ = client.get(params.switch_url.as_str()).send().await;
+    eprintln!(
+        "wmu-guest-auth: pre-GET {} (WLC session bootstrap)",
+        params.switch_url
+    );
+    match client.get(params.switch_url.as_str()).send().await {
+        Ok(r) => eprintln!("wmu-guest-auth: pre-GET → HTTP {}", r.status().as_u16()),
+        Err(e) => eprintln!("wmu-guest-auth: pre-GET failed ({e}), continuing"),
+    }
 
     // Replicate the portal's submitAction() exactly: if a `redirect=` param
     // was in the source URL, final redirect_url = "http://www.wmich.edu"
@@ -76,7 +87,17 @@ pub async fn authenticate(params: &WlcParams) -> Result<AuthResult, WmuError> {
         }
     };
 
+    eprintln!(
+        "wmu-guest-auth: POST {} (buttonClicked=4)",
+        params.switch_url
+    );
+    let post_start = std::time::Instant::now();
     let (mut status, mut body) = post_once(&client).await?;
+    eprintln!(
+        "wmu-guest-auth: POST → HTTP {status} in {}ms (body={} bytes)",
+        post_start.elapsed().as_millis(),
+        body.len()
+    );
 
     // err_flag=1 in response body = WLC rejected with "prior attempt
     // failed". Cisco's own loginscript.js submitAction() handles this by

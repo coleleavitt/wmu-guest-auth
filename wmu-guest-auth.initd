@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+# OpenRC init script for the wmu-guest-auth daemon.
+#
+# Install: sudo install -m 755 wmu-guest-auth.initd /etc/init.d/wmu-guest-auth
+# Enable:  sudo rc-update add wmu-guest-auth default
+# Start:   sudo rc-service wmu-guest-auth start
+
+name="wmu-guest-auth daemon"
+description="Re-auths against WMU Guest captive portal on AP roam / connectivity drop"
+
+command="/usr/local/bin/wmu-guest-auth"
+command_args="daemon"
+command_background="yes"
+
+pidfile="/run/wmu-guest-auth.pid"
+output_log="/var/log/wmu-guest-auth.log"
+error_log="/var/log/wmu-guest-auth.log"
+
+depend() {
+    need dbus
+    use NetworkManager
+    after NetworkManager
+}

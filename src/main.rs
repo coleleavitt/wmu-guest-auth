@@ -2,6 +2,7 @@
 
 mod assets;
 mod auth;
+mod daemon;
 mod dns;
 mod error;
 mod portal;
@@ -85,6 +86,10 @@ enum Commands {
         #[arg(long, default_value = "30")]
         dhcp_timeout: u64,
     },
+    /// Long-running daemon. Subscribes to NM DBus events and re-invokes
+    /// auto-auth on AP roams + connectivity drops. Complements the
+    /// dispatcher scripts which only fire on initial connect/disconnect.
+    Daemon,
 }
 
 #[tokio::main]
@@ -108,6 +113,7 @@ async fn main() -> Result<(), WmuError> {
             interface,
             dhcp_timeout,
         } => cmd_auto_auth(retries, delay, interface, dhcp_timeout).await,
+        Commands::Daemon => daemon::run().await,
     }
 }
 

@@ -12,3 +12,5 @@ hickory-resolver = "0.25"
 scraper = "0.22"
 url = "2"
 colored = "3"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+futures-util = "0.3"

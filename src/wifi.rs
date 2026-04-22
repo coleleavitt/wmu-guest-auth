@@ -147,12 +147,24 @@ pub async fn detect_captive_portal() -> ProbeResult {
         .build()
         .unwrap();
 
+    eprintln!("wmu-guest-auth: probe GET {CAPTIVE_PORTAL_PROBE}");
+    let start = std::time::Instant::now();
     let resp = match client.get(CAPTIVE_PORTAL_PROBE).send().await {
         Ok(r) => r,
-        Err(_) => return ProbeResult::NoNetwork,
+        Err(e) => {
+            eprintln!(
+                "wmu-guest-auth: probe failed in {}ms ({e}) → NoNetwork",
+                start.elapsed().as_millis()
+            );
+            return ProbeResult::NoNetwork;
+        }
     };
 
     let status = resp.status().as_u16();
+    eprintln!(
+        "wmu-guest-auth: probe → HTTP {status} in {}ms",
+        start.elapsed().as_millis()
+    );
 
     // Only HTTP 204 with empty body means truly online. This is the entire
     // contract of /generate_204 - any other status (including 200) indicates
@@ -243,7 +255,9 @@ pub async fn verify_connectivity() -> bool {
 /// WLC sessions that pass the HTTP probe but haven't actually promoted our
 /// MAC for this visit.
 pub async fn is_truly_online() -> bool {
+    eprintln!("wmu-guest-auth: is_truly_online (dual-probe starting)");
     if !matches!(detect_captive_portal().await, ProbeResult::Online) {
+        eprintln!("wmu-guest-auth: HTTP probe says not-online → dual-probe fails");
         return false;
     }
 
@@ -252,17 +266,31 @@ pub async fn is_truly_online() -> bool {
         .build()
         .unwrap();
 
-    // HTTPS to a real host. If captive, the WLC RSTs the TCP connection
-    // at the TLS handshake stage → reqwest returns a connection error.
-    // If truly online, we get a 204 back from Google's CDN.
+    eprintln!("wmu-guest-auth: HTTPS verify HEAD {HTTPS_VERIFY_URL}");
+    let start = std::time::Instant::now();
+    // HTTPS to a real host. If captive, the WLC RSTs the TCP connection at
+    // the TLS handshake → reqwest returns a connection error. Successful
+    // handshake + 204/200 proves MAC is in WLC's RUN state.
     match client.head(HTTPS_VERIFY_URL).send().await {
         Ok(resp) => {
             let s = resp.status().as_u16();
-            eprintln!("wmu-guest-auth: HTTPS verify → {s}");
-            s == 204 || s == 200
+            let ok = s == 204 || s == 200;
+            eprintln!(
+                "wmu-guest-auth: HTTPS verify → {s} in {}ms ({})",
+                start.elapsed().as_millis(),
+                if ok {
+                    "truly online"
+                } else {
+                    "unexpected status"
+                }
+            );
+            ok
         }
         Err(e) => {
-            eprintln!("wmu-guest-auth: HTTPS verify failed ({e}) → still captive");
+            eprintln!(
+                "wmu-guest-auth: HTTPS verify RST/failed in {}ms ({e}) → still captive",
+                start.elapsed().as_millis()
+            );
             false
         }
     }
