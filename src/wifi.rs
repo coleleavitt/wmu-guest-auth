@@ -225,6 +225,45 @@ fn extract_portal_url_from_body(html: &str) -> Option<Url> {
     None
 }
 
+/// HTTPS verification endpoint. The WLC does NOT MITM HTTPS — it TCP-RSTs
+/// all port-443 connections while the client is in WEBAUTH_REQD state. A
+/// successful TLS handshake + response therefore proves the client is in
+/// RUN state (fully authenticated). We use a lightweight HEAD to minimize
+/// bandwidth; the response content doesn't matter, only that the connection
+/// was not reset.
+const HTTPS_VERIFY_URL: &str = "https://www.gstatic.com/generate_204";
+
 pub async fn verify_connectivity() -> bool {
     matches!(detect_captive_portal().await, ProbeResult::Online)
+}
+
+/// Dual-probe: HTTP 204 (captive portal detection) + HTTPS connection test
+/// (proves client MAC is in WLC's RUN state). Returns true only when BOTH
+/// pass. This prevents false-positive "already online" from stale cached
+/// WLC sessions that pass the HTTP probe but haven't actually promoted our
+/// MAC for this visit.
+pub async fn is_truly_online() -> bool {
+    if !matches!(detect_captive_portal().await, ProbeResult::Online) {
+        return false;
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    // HTTPS to a real host. If captive, the WLC RSTs the TCP connection
+    // at the TLS handshake stage → reqwest returns a connection error.
+    // If truly online, we get a 204 back from Google's CDN.
+    match client.head(HTTPS_VERIFY_URL).send().await {
+        Ok(resp) => {
+            let s = resp.status().as_u16();
+            eprintln!("wmu-guest-auth: HTTPS verify → {s}");
+            s == 204 || s == 200
+        }
+        Err(e) => {
+            eprintln!("wmu-guest-auth: HTTPS verify failed ({e}) → still captive");
+            false
+        }
+    }
 }

@@ -409,9 +409,22 @@ async fn cmd_auto_auth(
 
         match wifi::detect_captive_portal().await {
             ProbeResult::Online => {
-                eprintln!("wmu-guest-auth: already online (attempt {attempt})");
-                kick_nm_connectivity().await;
-                return Ok(());
+                if wifi::is_truly_online().await {
+                    eprintln!("wmu-guest-auth: already online (attempt {attempt})");
+                    kick_nm_connectivity().await;
+                    return Ok(());
+                }
+                // HTTP probe says 204 but HTTPS failed — stale WLC session.
+                // Fall through to auth using the fallback portal URL.
+                eprintln!("wmu-guest-auth: HTTP probe says online but HTTPS failed — forcing auth");
+                let params = portal::WlcParams::direct_default();
+                match auth::authenticate(&params).await {
+                    Ok(result) => eprintln!(
+                        "wmu-guest-auth: POST buttonClicked=4 → HTTP {} (body-success={})",
+                        result.status, result.success
+                    ),
+                    Err(e) => eprintln!("wmu-guest-auth: direct auth POST failed: {e}"),
+                }
             }
             ProbeResult::NoNetwork => {
                 eprintln!("wmu-guest-auth: no network (attempt {attempt}/{retries})");
@@ -466,7 +479,7 @@ async fn cmd_auto_auth(
                 let mut confirmed = false;
                 for verify_attempt in 1..=5 {
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    if matches!(wifi::detect_captive_portal().await, ProbeResult::Online) {
+                    if wifi::is_truly_online().await {
                         eprintln!(
                             "wmu-guest-auth: online! (verified {verify_attempt}s after auth)"
                         );
