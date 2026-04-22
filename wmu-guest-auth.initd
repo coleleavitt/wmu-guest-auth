@@ -11,10 +11,16 @@ description="Re-auths against WMU Guest captive portal on AP roam / connectivity
 command="/usr/local/bin/wmu-guest-auth"
 command_args="daemon"
 command_background="yes"
+command_user="root:root"
 
 pidfile="/run/wmu-guest-auth.pid"
 output_log="/var/log/wmu-guest-auth.log"
 error_log="/var/log/wmu-guest-auth.log"
+
+respawn_delay=5
+respawn_max=0
+respawn_period=60
+supervisor=supervise-daemon
 
 depend() {
     need dbus
