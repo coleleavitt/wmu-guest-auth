@@ -10,9 +10,13 @@ use crate::error::WmuError;
 use crate::wifi;
 
 const TARGET_SSID: &str = "WMU Guest";
-const COOLDOWN: Duration = Duration::from_secs(30);
-const SELF_POLL: Duration = Duration::from_secs(20);
+const COOLDOWN: Duration = Duration::from_secs(15);
+const SELF_POLL: Duration = Duration::from_secs(5);
+const KEEPALIVE: Duration = Duration::from_secs(120);
+const PROACTIVE_REAUTH: Duration = Duration::from_secs(15 * 60);
 const CONN_FULL: u32 = 4;
+
+const KEEPALIVE_URL: &str = "https://www.gstatic.com/generate_204";
 
 /// Run the daemon event loop. Subscribes to two NM DBus property streams:
 ///
@@ -92,13 +96,22 @@ pub async fn run() -> Result<(), WmuError> {
 
     let mut poll_tick = tokio::time::interval(SELF_POLL);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Skip the first immediate tick (we just did startup check).
     poll_tick.tick().await;
 
+    let mut keepalive_tick = tokio::time::interval(KEEPALIVE);
+    keepalive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    keepalive_tick.tick().await;
+
+    let mut reauth_tick = tokio::time::interval(PROACTIVE_REAUTH);
+    reauth_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    reauth_tick.tick().await;
+
     log(&format!(
-        "event loop running (cooldown={}s, self-poll={}s)",
+        "event loop running (cooldown={}s, self-poll={}s, keepalive={}s, proactive-reauth={}s)",
         COOLDOWN.as_secs(),
-        SELF_POLL.as_secs()
+        SELF_POLL.as_secs(),
+        KEEPALIVE.as_secs(),
+        PROACTIVE_REAUTH.as_secs()
     ));
 
     loop {
@@ -150,7 +163,46 @@ pub async fn run() -> Result<(), WmuError> {
                     log("self-poll: confirmed online");
                 }
             }
+            _ = keepalive_tick.tick() => {
+                if !on_target_ssid(&conn).await {
+                    continue;
+                }
+                send_keepalive().await;
+            }
+            _ = reauth_tick.tick() => {
+                if !on_target_ssid(&conn).await {
+                    continue;
+                }
+                // Proactive reauth: fire regardless of current state to
+                // refresh the WLC session before it can time out. If we're
+                // still in RUN state this is a no-op on the WLC side
+                // (buttonClicked=4 to an already-authed MAC is idempotent).
+                // Bypasses the normal cooldown because this is scheduled,
+                // not reactive.
+                log("proactive reauth: refreshing WLC session");
+                last_trigger = None;
+                try_trigger(&mut last_trigger, "proactive reauth").await;
+            }
         }
+    }
+}
+
+async fn send_keepalive() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let start = Instant::now();
+    match client.head(KEEPALIVE_URL).send().await {
+        Ok(r) => log(&format!(
+            "keepalive HEAD {KEEPALIVE_URL} → {} in {}ms",
+            r.status().as_u16(),
+            start.elapsed().as_millis()
+        )),
+        Err(e) => log(&format!("keepalive failed ({e}) - WLC may have dropped us")),
     }
 }
 
