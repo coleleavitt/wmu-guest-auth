@@ -1,4 +1,6 @@
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use zbus::Connection;
@@ -13,6 +15,18 @@ const COOLDOWN: Duration = Duration::from_secs(15);
 const KEEPALIVE: Duration = Duration::from_secs(120);
 const PROACTIVE_REAUTH: Duration = Duration::from_secs(15 * 60);
 const CONN_FULL: u32 = 4;
+
+/// If the main event loop hasn't made progress in this long, exit so
+/// supervise-daemon respawns us. Defends against two observed failure modes:
+///  - Tokio timers wedged after laptop suspend/resume (monotonic-clock edge
+///    case; reproduced at t=2301 → 59min gap in /var/log/wmu-guest-auth.log).
+///  - zbus SignalStream terminates silently on DBus disconnect. Per zbus
+///    5.15 source (proxy/mod.rs:1325), SignalStream is a FusedStream that
+///    returns None forever after terminate — no auto-reconnect.
+///
+/// Must be > 2 × max(KEEPALIVE, POLL_IDLE) to avoid false restarts.
+const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(300);
+const WATCHDOG_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 const KEEPALIVE_URL: &str = "https://www.gstatic.com/generate_204";
 
@@ -113,16 +127,21 @@ pub async fn run() -> Result<(), WmuError> {
     reauth_tick.tick().await;
 
     log(&format!(
-        "event loop running (cooldown={}s, poll=adaptive[{}/{}/{}]s, keepalive={}s, proactive-reauth={}s)",
+        "event loop running (cooldown={}s, poll=adaptive[{}/{}/{}]s, keepalive={}s, proactive-reauth={}s, watchdog={}s)",
         COOLDOWN.as_secs(),
         POLL_FAST.as_secs(),
         POLL_STABLE.as_secs(),
         POLL_IDLE.as_secs(),
         KEEPALIVE.as_secs(),
-        PROACTIVE_REAUTH.as_secs()
+        PROACTIVE_REAUTH.as_secs(),
+        WATCHDOG_TIMEOUT.as_secs(),
     ));
 
+    let heartbeat = Arc::new(AtomicU64::new(unix_now()));
+    spawn_watchdog(Arc::clone(&heartbeat));
+
     loop {
+        heartbeat.store(unix_now(), Ordering::Relaxed);
         tokio::select! {
             Some(signal) = triggers.next() => {
                 let args = match signal.args() {
@@ -301,7 +320,13 @@ async fn try_trigger(state: &mut DaemonState, reason: &str) -> bool {
     state.last_trigger = Some(Instant::now());
     log(&format!("{reason} → in-process auto-auth starting"));
     let start = Instant::now();
-    match crate::cmd_auto_auth(2, 2, None, 5).await {
+    // retries=4, delay=3: ~45s total budget. Tuned from real campus logs
+    // at t=2003-2301 where recovery took 19-30s per attempt; the previous
+    // 2-retry × 2s delay budget ran out in ~15s and gave up while the
+    // network was still stabilizing, then kept retrying with a 15s
+    // cooldown gap in between. Net user-visible captive time was 60+s
+    // instead of the ~20s needed to actually recover.
+    match crate::cmd_auto_auth(4, 3, None, 5).await {
         Ok(()) => log(&format!(
             "auto-auth succeeded in {}ms",
             start.elapsed().as_millis()
@@ -316,6 +341,39 @@ async fn try_trigger(state: &mut DaemonState, reason: &str) -> bool {
 
 fn log(msg: &str) {
     eprintln!("[wmu-guest-auth daemon {}] {msg}", chrono_now());
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Spawn a separate tokio task that checks the heartbeat every minute.
+/// If the main loop has not updated it within WATCHDOG_TIMEOUT, exit the
+/// process. supervise-daemon will respawn us with a fresh zbus Connection
+/// and a fresh tokio runtime - recovering from the hangs we saw at
+/// t=2301→3556s and any future DBus/timer wedge.
+///
+/// Uses SystemTime (wall clock) not tokio::Instant, because the whole
+/// point is that tokio timers may themselves be wedged.
+fn spawn_watchdog(heartbeat: Arc<AtomicU64>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(WATCHDOG_CHECK_INTERVAL).await;
+            let last = heartbeat.load(Ordering::Relaxed);
+            let now = unix_now();
+            let age = now.saturating_sub(last);
+            if age > WATCHDOG_TIMEOUT.as_secs() {
+                log(&format!(
+                    "WATCHDOG: event loop silent for {age}s (limit {}s) — exiting for respawn",
+                    WATCHDOG_TIMEOUT.as_secs()
+                ));
+                std::process::exit(42);
+            }
+        }
+    });
 }
 
 fn chrono_now() -> String {
